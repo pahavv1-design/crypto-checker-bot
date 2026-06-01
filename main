@@ -17,6 +17,8 @@ dp = Dispatcher()
 BINANCE_API = "https://api.binance.com/api/v3/ticker/24hr?symbol="
 CBR_API = "https://www.cbr-xml-daily.ru/daily_json.js"
 
+SUPPORTED_QUOTES = ["USDT", "RUB", "EUR"]
+
 
 # ================= BINANCE =================
 
@@ -28,17 +30,23 @@ async def get_crypto(pair: str):
             return await resp.json()
 
 
-# ================= ЦБ РФ =================
+# ================= ЦБ =================
 
-async def get_usd_rub():
+async def get_cbr():
     async with aiohttp.ClientSession() as session:
         async with session.get(CBR_API) as resp:
             text = await resp.text()
             try:
-                data = json.loads(text)
-                return float(data["Valute"]["USD"]["Value"])
+                return json.loads(text)
             except:
                 return None
+
+
+async def get_usd_rub():
+    data = await get_cbr()
+    if not data:
+        return None
+    return float(data["Valute"]["USD"]["Value"])
 
 
 # ================= ФОРМАТ =================
@@ -50,14 +58,12 @@ def format_crypto(base, quote, data):
 
     arrow = "🟢" if change >= 0 else "🔴"
 
-    text = (
-        f"📊 {base}/{quote}\n\n"
+    return (
+        f"📊 {base}/{quote}\n"
         f"💰 Цена: {price:,.4f}\n"
         f"{arrow} 24ч: {change:.2f}%\n"
-        f"📈 Объём: {volume:,.0f}"
+        f"📈 Объём: {volume:,.0f}\n"
     )
-
-    return text
 
 
 # ================= КОМАНДЫ =================
@@ -65,12 +71,22 @@ def format_crypto(base, quote, data):
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await message.answer(
-        "CryptoAll Bot\n\n"
-        "Команды:\n"
+        "CryptoAll Terminal\n\n"
+        "Введите /help для списка команд.",
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+
+@dp.message(Command("help"))
+async def help_cmd(message: types.Message):
+    await message.answer(
+        "Доступные команды:\n\n"
         "/c BTC\n"
         "/c BTC RUB\n"
-        "/usd",
-        reply_markup=ReplyKeyboardRemove()
+        "/c BTC EUR\n"
+        "/c BTC ALL\n\n"
+        "/usd\n"
+        "/rates"
     )
 
 
@@ -80,8 +96,22 @@ async def usd(message: types.Message):
     if not rate:
         await message.reply("Ошибка получения курса ЦБ.")
         return
-
     await message.reply(f"💵 1 USD = {rate:.2f} ₽ (ЦБ РФ)")
+
+
+@dp.message(Command("rates"))
+async def rates(message: types.Message):
+    data = await get_cbr()
+    if not data:
+        await message.reply("Ошибка получения курсов.")
+        return
+
+    text = "💱 Курсы ЦБ РФ:\n\n"
+    for code in ["USD", "EUR", "CNY", "GBP"]:
+        value = data["Valute"][code]["Value"]
+        text += f"{code}: {value:.2f} ₽\n"
+
+    await message.reply(text)
 
 
 @dp.message(Command("c"))
@@ -92,7 +122,31 @@ async def crypto(message: types.Message, command: CommandObject):
 
     args = command.args.split()
     base = args[0].upper()
-    quote = args[1].upper() if len(args) > 1 else "USDT"
+
+    if len(args) > 1:
+        quote = args[1].upper()
+    else:
+        quote = "USDT"
+
+    # ALL режим
+    if quote == "ALL":
+        result_text = ""
+        for q in SUPPORTED_QUOTES:
+            pair = f"{base}{q}"
+            data = await get_crypto(pair)
+            if data:
+                result_text += format_crypto(base, q, data) + "\n"
+
+        if not result_text:
+            await message.reply("Монета не найдена.")
+            return
+
+        await message.reply(result_text)
+        return
+
+    if quote not in SUPPORTED_QUOTES:
+        await message.reply("Доступные валюты: USDT, RUB, EUR или ALL")
+        return
 
     pair = f"{base}{quote}"
     data = await get_crypto(pair)
@@ -101,20 +155,24 @@ async def crypto(message: types.Message, command: CommandObject):
         await message.reply("Монета или пара не найдена.")
         return
 
-    # Если USDT — добавим пересчёт в RUB
+    text = format_crypto(base, quote, data)
+
+    # если USDT — добавим RUB через ЦБ
     if quote == "USDT":
         usd_rub = await get_usd_rub()
         if usd_rub:
             price_usdt = float(data["lastPrice"])
-            price_rub = price_usdt * usd_rub
-            rub_line = f"\n💱 RUB (через ЦБ): {price_rub:,.2f} ₽"
-        else:
-            rub_line = ""
-    else:
-        rub_line = ""
+            rub_price = price_usdt * usd_rub
+            text += f"💱 RUB (через ЦБ): {rub_price:,.2f} ₽"
 
-    text = format_crypto(base, quote, data) + rub_line
     await message.reply(text)
+
+
+# ================= ОБРАБОТКА НЕИЗВЕСТНЫХ =================
+
+@dp.message()
+async def unknown(message: types.Message):
+    await message.reply("Неизвестная команда. Введите /help")
 
 
 # ================= ЗАПУСК =================
